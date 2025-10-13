@@ -4,6 +4,8 @@ import { fetch } from "node-fetch-native";
 import type { ResolvedChangelogConfig } from "./config";
 import type { GitCommit, Reference } from "./git";
 import { formatReference, formatCompareChanges } from "./repo";
+import { getPullRequestAuthorLogin } from "./github";
+import { loginFromNoReply } from "./utils/github-username";
 
 export async function generateMarkDown(
   commits: GitCommit[],
@@ -45,6 +47,7 @@ export async function generateMarkDown(
   }
 
   const _authors = new Map<string, { email: Set<string>; github?: string }>();
+  const _authorPRs = new Map<string, Set<number>>();
   for (const commit of commits) {
     if (!commit.author) {
       continue;
@@ -61,25 +64,76 @@ export async function generateMarkDown(
     ) {
       continue;
     }
+
     if (_authors.has(name)) {
-      const entry = _authors.get(name);
-      entry.email.add(commit.author.email);
+      const entry = _authors.get(name)!;
+      if (commit.author.email) {
+        entry.email.add(commit.author.email);
+      }
     } else {
-      _authors.set(name, { email: new Set([commit.author.email]) });
+      _authors.set(name, {
+        email: new Set([commit.author.email].filter(Boolean) as string[]),
+      });
+    }
+
+    // Collect PR references for this author
+    const refs = Array.isArray(commit.references) ? commit.references : [];
+    for (const ref of refs) {
+      if (ref?.type === "pull-request" && typeof ref.value === "string") {
+        const num = Number.parseInt(ref.value.replace("#", ""), 10);
+        if (Number.isFinite(num)) {
+          if (!_authorPRs.has(name)) {
+            _authorPRs.set(name, new Set());
+          }
+          _authorPRs.get(name)!.add(num);
+        }
+      }
     }
   }
 
-  // Try to map authors to github usernames
+  // Try to map authors to github usernames with new strategy
   await Promise.all(
     [..._authors.keys()].map(async (authorName) => {
-      const meta = _authors.get(authorName);
+      const meta = _authors.get(authorName)!;
+
+      // 1) Prefer extracting login from noreply emails (local, privacy-safe)
       for (const email of meta.email) {
+        const login = loginFromNoReply(email);
+        if (login) {
+          meta.github = login;
+          break;
+        }
+      }
+      if (meta.github) {
+        return;
+      }
+
+      // 2) Fallback to ungh.cc for non-noreply emails
+      for (const email of meta.email) {
+        if (!email || email.includes("noreply.github.com")) continue;
         const { user } = await fetch(`https://ungh.cc/users/find/${email}`)
           .then((r) => r.json())
           .catch(() => ({ user: null }));
-        if (user) {
+        if (user?.username) {
           meta.github = user.username;
           break;
+        }
+      }
+      if (meta.github) {
+        return;
+      }
+
+      // 3) Final fallback: use PR author login for any PRs referenced by this author's commits
+      if (config.repo?.provider === "github") {
+        const prs = [...(_authorPRs.get(authorName) || [])];
+        for (const prNumber of prs) {
+          const login = await getPullRequestAuthorLogin(config, prNumber).catch(
+            () => undefined
+          );
+          if (login) {
+            meta.github = login;
+            break;
+          }
         }
       }
     })

@@ -2,7 +2,7 @@ import { existsSync, promises as fsp } from "node:fs";
 import { homedir } from "node:os";
 import { $fetch, FetchOptions } from "ofetch";
 import { join } from "pathe";
-import { ResolvedChangelogConfig } from "./config";
+import type { ResolvedChangelogConfig } from "./config";
 
 export interface GithubOptions {
   repo: string;
@@ -114,6 +114,18 @@ export function githubNewReleaseURL(
   return `https://${config.repo.domain}/${config.repo.repo}/releases/new?tag=v${
     release.version
   }&title=v${release.version}&body=${encodeURIComponent(release.body)}`;
+}
+
+export async function getPullRequestAuthorLogin(
+  config: ResolvedChangelogConfig,
+  prNumber: number
+): Promise<string | undefined> {
+  // Uses existing githubFetch helper and repo config
+  const pr = await githubFetch(
+    config,
+    `/repos/${config.repo.repo}/pulls/${prNumber}`
+  ).catch(() => undefined as any);
+  return pr?.user?.login as string | undefined;
 }
 
 export async function resolveGithubToken(config: ResolvedChangelogConfig) {
